@@ -36,11 +36,52 @@ def init_db() -> None:
     while time.monotonic() < deadline:
         try:
             Base.metadata.create_all(bind=engine)
+            _upgrade_existing_tables(bind=engine)
             return
         except OperationalError as exc:
             last_error = exc
             time.sleep(1)
     raise RuntimeError(f"等待数据库就绪超时：{last_error}")
+
+
+def _upgrade_existing_tables(bind) -> None:
+    """对旧版本库做幂等补齐（无需手工迁移）。
+
+    预留功能为 ``authorizations`` 增加了 ``reserved_count`` 列与
+    ``ck_auth_reserved_invariant`` 约束；新建库由 ``create_all`` 直接
+    建出，旧库则在此幂等补齐（列存在/约束存在时跳过）。
+    """
+    from sqlalchemy import text
+
+    with bind.begin() as conn:
+        has_col = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name='authorizations' AND column_name='reserved_count'"
+            )
+        ).first()
+        if not has_col:
+            conn.execute(
+                text(
+                    "ALTER TABLE authorizations "
+                    "ADD COLUMN reserved_count INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+        has_ck = conn.execute(
+            text(
+                "SELECT 1 FROM pg_constraint WHERE conname="
+                "'ck_auth_reserved_invariant'"
+            )
+        ).first()
+        if not has_ck:
+            conn.execute(
+                text(
+                    "ALTER TABLE authorizations "
+                    "ADD CONSTRAINT ck_auth_reserved_invariant "
+                    "CHECK (reserved_count >= 0 "
+                    "AND used_count + reserved_count <= max_count)"
+                )
+            )
 
 
 def get_db():

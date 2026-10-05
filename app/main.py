@@ -19,11 +19,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="素材发行授权核验 API",
-    version="1.1.0",
+    version="1.2.0",
     description=(
         "登记素材与授权（地区/渠道/带时区左闭右开时段/可发行次数），"
-        "对发行申请做整体核验、原子占用，支持查询、一次性撤销，"
-        "以及授权退役时将未撤销申请一次性改挂到替代授权。"
+        "对发行申请做整体核验、原子占用，支持查询、一次性撤销、"
+        "授权退役时将未撤销申请一次性改挂到替代授权；"
+        "并支持 1～30 分钟有效期的发行额度预留（待确认/确认/取消/过期）。"
     ),
     lifespan=lifespan,
 )
@@ -153,3 +154,62 @@ def revoke_distribution(
     distribution_id: int, db: Session = Depends(get_db)
 ):
     return services.revoke_distribution(db, distribution_id)
+
+
+# ------------------------------------------------------------------ 预留
+@app.post(
+    "/api/v1/reservations",
+    response_model=schemas.ReservationOut,
+    status_code=201,
+    tags=["reservations"],
+    summary="预留发行额度：全部素材同时通过才生成预留编号并逐项占额",
+)
+def create_reservation(
+    body: schemas.ReservationCreate, db: Session = Depends(get_db)
+):
+    return services.create_reservation(db, body)
+
+
+@app.get(
+    "/api/v1/reservations",
+    response_model=list[schemas.ReservationOut],
+    tags=["reservations"],
+    summary="查询预留列表（可按 status 过滤：待确认/已确认/已取消/已过期）",
+)
+def list_reservations(
+    status: str | None = None, db: Session = Depends(get_db)
+):
+    return services.list_reservations(db, status)
+
+
+@app.get(
+    "/api/v1/reservations/{reservation_id}",
+    response_model=schemas.ReservationOut,
+    tags=["reservations"],
+)
+def get_reservation(reservation_id: int, db: Session = Depends(get_db)):
+    return services.get_reservation(db, reservation_id)
+
+
+@app.post(
+    "/api/v1/reservations/{reservation_id}/confirm",
+    response_model=schemas.ReservationOut,
+    tags=["reservations"],
+    summary="到期前确认：原子转为一笔已通过申请（重复确认返回同一笔）",
+)
+def confirm_reservation(
+    reservation_id: int, db: Session = Depends(get_db)
+):
+    return services.confirm_reservation(db, reservation_id)
+
+
+@app.post(
+    "/api/v1/reservations/{reservation_id}/cancel",
+    response_model=schemas.ReservationOut,
+    tags=["reservations"],
+    summary="取消预留（与确认互斥，仅生效一次，释放预留额度）",
+)
+def cancel_reservation(
+    reservation_id: int, db: Session = Depends(get_db)
+):
+    return services.cancel_reservation(db, reservation_id)

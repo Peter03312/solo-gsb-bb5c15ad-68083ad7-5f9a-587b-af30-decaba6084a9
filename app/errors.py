@@ -89,3 +89,74 @@ class MigrationRejected(APIError):
             message="授权改挂核验未通过，未变更任何申请归属与次数",
             details=reasons,
         )
+
+
+class ReservationRejected(APIError):
+    """预留核验未通过：整体拒绝、不占用任何（预留）额度。"""
+
+    def __init__(self, reasons: list[dict]):
+        super().__init__(
+            status_code=422,
+            code="reservation_rejected",
+            message="预留核验未通过，未占用任何预留额度",
+            details=reasons,
+        )
+
+
+class ReservationNotPending(APIError):
+    """对预留执行确认/取消时的状态冲突基类（409）。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(status_code=409, code=code, message=message)
+
+
+class ReservationAlreadyConfirmed(ReservationNotPending):
+    """预留已确认：重复确认幂等由路由处理；对已确认预留取消则冲突。"""
+
+    def __init__(self, reservation_id: int):
+        super().__init__(
+            code="reservation_already_confirmed",
+            message=f"预留已确认，不可取消：{reservation_id}",
+        )
+
+
+class ReservationAlreadyCancelled(ReservationNotPending):
+    """重复取消：409 且不再释放任何额度。"""
+
+    def __init__(self, reservation_id: int):
+        super().__init__(
+            code="reservation_already_cancelled",
+            message=f"预留已取消，重复取消不再释放额度：{reservation_id}",
+        )
+
+
+class ReservationCancelled(ReservationNotPending):
+    def __init__(self, reservation_id: int, action: str = "确认"):
+        super().__init__(
+            code="reservation_cancelled",
+            message=f"预留已取消，{action}被拒绝：{reservation_id}",
+        )
+
+
+class ReservationExpired(ReservationNotPending):
+    """到期时刻（含）之后确认视为逾期；取消已过期预留同样拒绝（额度已释放）。"""
+
+    def __init__(self, reservation_id: int, action: str = "确认"):
+        super().__init__(
+            code="reservation_expired",
+            message=f"预留已过期，{action}被拒绝：{reservation_id}",
+        )
+
+
+class InvalidReservationStatus(APIError):
+    """列表查询使用了不支持的状态过滤值。"""
+
+    def __init__(self, value: str):
+        super().__init__(
+            status_code=422,
+            code="invalid_reservation_status",
+            message=(
+                f"不支持的预留状态：{value}；"
+                "可选 pending/confirmed/cancelled/expired"
+            ),
+        )

@@ -14,6 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.config import settings
+
 
 def _ensure_aware(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
@@ -97,6 +99,9 @@ class AuthorizationOut(BaseModel):
     max_count: int
     used_count: int
     remaining: int
+    # 未到期（待确认）预留占用的额度；可预留余量 = max - used - reserved。
+    reserved_count: int
+    reservable_remaining: int
     status: str
     created_at: datetime
 
@@ -173,3 +178,90 @@ class DistributionOut(BaseModel):
     created_at: datetime
     revoked_at: datetime | None = None
     items: list[DistributionItemOut]
+
+
+# ------------------------------------------------------------- 额度预留
+class ReservationCreate(BaseModel):
+    material_ids: list[int] = Field(
+        min_length=1, description="本次预留涉及的素材编号（数据库自增 id）"
+    )
+    region: str = Field(min_length=1, max_length=64)
+    channel: str = Field(min_length=1, max_length=64)
+    occur_at: datetime = Field(description="发行时刻（带时区）")
+    ttl_minutes: int = Field(
+        ge=1,
+        le=30,
+        description=(
+            "预留有效期（分钟），范围 "
+            f"{settings.reservation_ttl_min_minutes}～"
+            f"{settings.reservation_ttl_max_minutes}；"
+            "到期时刻 = 受理时刻 + ttl_minutes"
+        ),
+    )
+
+    @field_validator("material_ids")
+    @classmethod
+    def _positive_ids(cls, v: list[int]) -> list[int]:
+        if any(mid <= 0 for mid in v):
+            raise ValueError("素材编号必须为正整数")
+        return v
+
+    @field_validator("region", "channel")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("不能为空串")
+        return v
+
+    @field_validator("occur_at")
+    @classmethod
+    def _occur_aware(cls, v: datetime) -> datetime:
+        return _ensure_aware(v, "occur_at")
+
+    @model_validator(mode="after")
+    def _validate_ttl(self) -> "ReservationCreate":
+        lo, hi = (
+            settings.reservation_ttl_min_minutes,
+            settings.reservation_ttl_max_minutes,
+        )
+        if not (lo <= self.ttl_minutes <= hi):
+            raise ValueError(
+                f"预留有效期必须在 {lo}～{hi} 分钟之间，"
+                f"收到 {self.ttl_minutes}"
+            )
+        return self
+
+
+class ReservationItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    item_index: int
+    material_id: int
+    authorization: AuthorizationOut
+
+
+class ReservationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    region: str
+    channel: str
+    occur_at: datetime
+    ttl_minutes: int
+    expires_at: datetime = Field(description="到期时刻（带时区）；左闭右开，到期时刻确认视为逾期")
+    # pending=待确认 confirmed=已确认 cancelled=已取消 expired=已过期。
+    # 读取时惰性结算：库内仍为 pending 但已过到期时刻的预留返回 expired。
+    status: Literal["pending", "confirmed", "cancelled", "expired"]
+    created_at: datetime
+    confirmed_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    expired_at: datetime | None = None
+    distribution_id: int | None = Field(
+        default=None, description="确认后生成的发行申请编号（重复确认返回同一笔）"
+    )
+    # 仅在已确认（status=confirmed）时随附完整申请。
+    distribution: DistributionOut | None = None
+    items: list[ReservationItemOut] = Field(
+        description="逐项命中授权（含确认时的逐项可预留余量快照）"
+    )

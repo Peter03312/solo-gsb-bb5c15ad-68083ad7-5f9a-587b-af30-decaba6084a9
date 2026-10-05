@@ -45,6 +45,14 @@ class Authorization(Base):
             "used_count >= 0 AND used_count <= max_count",
             name="ck_auth_quota_invariant",
         ),
+        # 未到期（待确认）预留占用的额度与正式占用共享 max_count：
+        # used_count 仅统计已通过申请（语义保持兼容），reserved_count
+        # 统计未到期待确认预留；二者之和不得超过 max_count。
+        CheckConstraint(
+            "reserved_count >= 0 "
+            "AND used_count + reserved_count <= max_count",
+            name="ck_auth_reserved_invariant",
+        ),
         Index(
             "ix_auth_match",
             "material_id",
@@ -69,6 +77,10 @@ class Authorization(Base):
     )
     max_count: Mapped[int] = mapped_column(Integer, nullable=False)
     used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 未到期（待确认）预留占用的次数；到期/取消后归还，确认时转入 used_count。
+    reserved_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     # active：可用于新申请；inactive：已停用，仅影响新申请。
     status: Mapped[str] = mapped_column(
         String(16), default="active", nullable=False
@@ -81,7 +93,13 @@ class Authorization(Base):
 
     @property
     def remaining(self) -> int:
+        """正式可占用余量（语义保持兼容：不含预留）。"""
         return self.max_count - self.used_count
+
+    @property
+    def reservable_remaining(self) -> int:
+        """可预留余量：总额度扣除正式占用与未到期预留后的剩余。"""
+        return self.max_count - self.used_count - self.reserved_count
 
 
 class Distribution(Base):
@@ -138,5 +156,101 @@ class DistributionItem(Base):
     item_index: Mapped[int] = mapped_column(Integer, nullable=False)
 
     distribution: Mapped["Distribution"] = relationship(back_populates="items")
+    material: Mapped["Material"] = relationship()
+    authorization: Mapped["Authorization"] = relationship()
+
+
+class Reservation(Base):
+    """一次额度预留：全部素材同时核验通过才生成预留编号并逐项占用预留额度。
+
+    生命周期状态：
+
+    - ``pending``   待确认（未到期；逐项占用 ``reserved_count``）
+    - ``confirmed`` 已确认（已原子转为一笔 approved 发行申请）
+    - ``cancelled`` 已取消（预留额度已释放，仅一次）
+    - ``expired``   已过期（到期未确认，预留额度已释放）
+
+    到期时刻（``expires_at``）的判定为左闭右开：``now < expires_at``
+    才允许确认；恰在到期时刻确认视为逾期。到期释放采用惰性清理：
+    任一通道写事务在咨询锁内首先把已过期待确认预留标记为 expired 并归还
+    额度，因此「到期即释放」对后续判定立即可见。
+    """
+
+    __tablename__ = "reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'confirmed', 'cancelled', 'expired')",
+            name="ck_resv_status",
+        ),
+        CheckConstraint(
+            "(status = 'confirmed') = (distribution_id IS NOT NULL)",
+            name="ck_resv_distribution",
+        ),
+        # 仅终态记录发生时刻；取消/过期互斥后各自只写一次。
+        CheckConstraint(
+            "ttl_minutes >= 1 AND ttl_minutes <= 30",
+            name="ck_resv_ttl_range",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    region: Mapped[str] = mapped_column(String(64), nullable=False)
+    channel: Mapped[str] = mapped_column(String(64), nullable=False)
+    occur_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    ttl_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False
+    )
+    # 确认成功后指向由本预留生成的那笔 approved 申请；重复确认据此返回同一笔。
+    distribution_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributions.id", ondelete="RESTRICT"), nullable=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+    items: Mapped[list["ReservationItem"]] = relationship(
+        back_populates="reservation",
+        cascade="all, delete-orphan",
+        order_by="ReservationItem.id",
+    )
+    distribution: Mapped["Distribution | None"] = relationship()
+
+
+class ReservationItem(Base):
+    """预留中每个素材所命中的授权（预留创建时确定，确认时转为同一授权）。"""
+
+    __tablename__ = "reservation_items"
+    __table_args__ = (
+        Index("ix_resv_item_auth", "authorization_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reservation_id: Mapped[int] = mapped_column(
+        ForeignKey("reservations.id", ondelete="CASCADE"), nullable=False
+    )
+    material_id: Mapped[int] = mapped_column(
+        ForeignKey("materials.id", ondelete="RESTRICT"), nullable=False
+    )
+    authorization_id: Mapped[int] = mapped_column(
+        ForeignKey("authorizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    item_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    reservation: Mapped["Reservation"] = relationship(back_populates="items")
     material: Mapped["Material"] = relationship()
     authorization: Mapped["Authorization"] = relationship()
