@@ -89,3 +89,67 @@ class MigrationRejected(APIError):
             message="授权改挂核验未通过，未变更任何申请归属与次数",
             details=reasons,
         )
+
+
+class ReservationRejected(APIError):
+    """预留核验未通过：整体拒绝、不占任何额度（正式/预留均不占）。"""
+
+    def __init__(self, reasons: list[dict]):
+        super().__init__(
+            status_code=422,
+            code="reservation_rejected",
+            message="预留核验未通过，未占用任何发行额度",
+            details=reasons,
+        )
+
+
+class ReservationExpired(APIError):
+    """预留已过期：确认被拒绝，额度已释放（或本次原子释放）。"""
+
+    def __init__(self, reservation_id: int):
+        super().__init__(
+            status_code=409,
+            code="reservation_expired",
+            message=(
+                f"预留已过期，确认视为逾期，额度已释放：{reservation_id}"
+            ),
+        )
+
+
+class ReservationCancelled(APIError):
+    """对已取消预留执行确认：拒绝；取消与确认互斥。"""
+
+    def __init__(self, reservation_id: int):
+        super().__init__(
+            status_code=409,
+            code="reservation_cancelled",
+            message=(
+                "预留已取消，取消与确认互斥，不可再确认："
+                f"{reservation_id}"
+            ),
+        )
+
+
+class ReservationAlreadyConfirmed(APIError):
+    """对已确认预留重复确认不是错误（返回同一申请）；
+
+    但对已确认预留执行取消属于非法状态转换。
+    """
+
+    def __init__(self, reservation_id: int):
+        super().__init__(
+            status_code=409,
+            code="reservation_already_confirmed",
+            message=f"预留已确认，不可取消：{reservation_id}",
+        )
+
+
+class ReservationAlreadyCancelled(APIError):
+    """重复取消：不再释放额度，返回 409。"""
+
+    def __init__(self, reservation_id: int):
+        super().__init__(
+            status_code=409,
+            code="reservation_already_cancelled",
+            message=f"预留已取消，不可重复取消：{reservation_id}",
+        )

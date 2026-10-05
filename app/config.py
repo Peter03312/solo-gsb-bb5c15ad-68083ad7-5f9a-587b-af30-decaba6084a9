@@ -17,6 +17,13 @@ class Settings:
     db_wait_timeout: int = int(os.getenv("DB_WAIT_TIMEOUT", "30"))
     db_pool_size: int = int(os.getenv("DB_POOL_SIZE", "10"))
     db_max_overflow: int = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+    # 预留有效期允许范围（分钟）：请求 ttl_minutes 必须落在闭区间内。
+    reservation_min_ttl_minutes: int = int(
+        os.getenv("RESERVATION_MIN_TTL_MINUTES", "1")
+    )
+    reservation_max_ttl_minutes: int = int(
+        os.getenv("RESERVATION_MAX_TTL_MINUTES", "30")
+    )
 
 
 settings = Settings()

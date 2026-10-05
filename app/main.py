@@ -1,7 +1,8 @@
 """FastAPI 应用入口与 HTTP 路由。"""
 from contextlib import asynccontextmanager
+from typing import Literal
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -19,11 +20,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="素材发行授权核验 API",
-    version="1.1.0",
+    version="1.2.0",
     description=(
         "登记素材与授权（地区/渠道/带时区左闭右开时段/可发行次数），"
         "对发行申请做整体核验、原子占用，支持查询、一次性撤销，"
-        "以及授权退役时将未撤销申请一次性改挂到替代授权。"
+        "授权退役时将未撤销申请一次性改挂到替代授权；"
+        "并支持按素材/地区/渠道/发行时刻/1～30 分钟有效期预留发行额度，"
+        "到期前确认原子转为一笔已通过申请，支持取消与四态查询。"
     ),
     lifespan=lifespan,
 )
@@ -153,3 +156,69 @@ def revoke_distribution(
     distribution_id: int, db: Session = Depends(get_db)
 ):
     return services.revoke_distribution(db, distribution_id)
+
+
+# ------------------------------------------------------------------ 预留
+@app.post(
+    "/api/v1/reservations",
+    response_model=schemas.ReservationOut,
+    status_code=201,
+    tags=["reservations"],
+    summary="预留发行额度：整体核验、逐项占额，返回预留编号与到期时刻",
+)
+def create_reservation(
+    body: schemas.ReservationCreate, db: Session = Depends(get_db)
+):
+    return services.create_reservation(db, body)
+
+
+@app.get(
+    "/api/v1/reservations",
+    response_model=schemas.ReservationListOut,
+    tags=["reservations"],
+    summary="预留列表查询（可按 pending/confirmed/cancelled/expired 过滤）",
+)
+def list_reservations(
+    status: Literal[
+        "pending", "confirmed", "cancelled", "expired"
+    ]
+    | None = Query(default=None, description="按预留状态过滤；缺省返回全部"),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    rows = services.list_reservations(db, status=status, limit=limit)
+    return {"items": rows, "count": len(rows)}
+
+
+@app.get(
+    "/api/v1/reservations/{reservation_id}",
+    response_model=schemas.ReservationOut,
+    tags=["reservations"],
+    summary="查询单个预留（查询前清理到期预留，四态区分）",
+)
+def get_reservation(reservation_id: int, db: Session = Depends(get_db)):
+    return services.get_reservation(db, reservation_id)
+
+
+@app.post(
+    "/api/v1/reservations/{reservation_id}/confirm",
+    response_model=schemas.ReservationOut,
+    tags=["reservations"],
+    summary="到期前确认：预留原子转为一笔已通过申请（重复确认返回同一申请）",
+)
+def confirm_reservation(
+    reservation_id: int, db: Session = Depends(get_db)
+):
+    return services.confirm_reservation(db, reservation_id)
+
+
+@app.post(
+    "/api/v1/reservations/{reservation_id}/cancel",
+    response_model=schemas.ReservationOut,
+    tags=["reservations"],
+    summary="取消预留（仅可一次，释放额度；与确认互斥）",
+)
+def cancel_reservation(
+    reservation_id: int, db: Session = Depends(get_db)
+):
+    return services.cancel_reservation(db, reservation_id)

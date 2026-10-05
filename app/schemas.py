@@ -95,8 +95,14 @@ class AuthorizationOut(BaseModel):
     starts_at: datetime
     ends_at: datetime
     max_count: int
+    # used_count/remaining 语义与旧版完全一致：仅统计已通过（未撤销）申请。
     used_count: int
     remaining: int
+    # 未到期待确认预留对该授权的逐项占额。
+    reserved_count: int
+    # 可预留余量 = max_count - used_count - reserved_count，
+    # 即新申请与新预留此刻还能使用的次数。
+    available: int
     status: str
     created_at: datetime
 
@@ -173,3 +179,73 @@ class DistributionOut(BaseModel):
     created_at: datetime
     revoked_at: datetime | None = None
     items: list[DistributionItemOut]
+
+
+# --------------------------------------------------------------- 额度预留
+class ReservationCreate(BaseModel):
+    material_ids: list[int] = Field(
+        min_length=1, description="本次预留的素材编号（数据库自增 id，不可重复）"
+    )
+    region: str = Field(min_length=1, max_length=64)
+    channel: str = Field(min_length=1, max_length=64)
+    occur_at: datetime = Field(description="带时区发行时刻")
+    ttl_minutes: int = Field(
+        description=(
+            "预留有效期（分钟），须在服务端配置的 "
+            "RESERVATION_MIN/MAX_TTL_MINUTES 区间内（默认 1～30）；"
+            "到期时刻 = 创建时刻 + ttl_minutes，到期时刻确认视为逾期"
+        )
+    )
+
+    @field_validator("material_ids")
+    @classmethod
+    def _positive_ids(cls, v: list[int]) -> list[int]:
+        if any(mid <= 0 for mid in v):
+            raise ValueError("素材编号必须为正整数")
+        return v
+
+    @field_validator("region", "channel")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("不能为空串")
+        return v
+
+    @field_validator("occur_at")
+    @classmethod
+    def _occur_aware(cls, v: datetime) -> datetime:
+        return _ensure_aware(v, "occur_at")
+
+
+class ReservationItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    item_index: int
+    material_id: int
+    authorization: AuthorizationOut
+
+
+class ReservationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    region: str
+    channel: str
+    occur_at: datetime
+    expires_at: datetime
+    status: Literal["pending", "confirmed", "cancelled", "expired"]
+    created_at: datetime
+    confirmed_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    # 确认成功后挂接的那一笔已通过申请；重复确认返回同一申请。
+    distribution_id: int | None = None
+    distribution: DistributionOut | None = None
+    items: list[ReservationItemOut]
+
+
+class ReservationListOut(BaseModel):
+    """预留查询结果：可按状态过滤（缺省返回全部）。"""
+
+    items: list[ReservationOut]
+    count: int
